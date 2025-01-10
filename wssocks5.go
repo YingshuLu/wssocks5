@@ -11,8 +11,8 @@ type WsSocks5Proxy struct {
 	cancel context.CancelFunc
 }
 
-func NewWsSocks5Proxy(d Dispatcher) *WsSocks5Proxy {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewWsSocks5Proxy(ctx context.Context, d Dispatcher) *WsSocks5Proxy {
+	ctx, cancel := context.WithCancel(ctx)
 	return &WsSocks5Proxy{
 		Dispatcher: d,
 		ctx:        ctx,
@@ -20,11 +20,11 @@ func NewWsSocks5Proxy(d Dispatcher) *WsSocks5Proxy {
 	}
 }
 
-func (w *WsSocks5Proxy) Serve() {
+func (w *WsSocks5Proxy) Serve() error {
 	for {
-		tunnel, err := w.AcceptTunnel()
+		tunnel, err := w.AcceptTunnel(w.ctx)
 		if err != nil {
-			break
+			return err
 		}
 		go w.accept(tunnel)
 	}
@@ -66,7 +66,7 @@ func (w *WsSocks5Proxy) handshake(tunnel Tunnel) (target net.Conn, err error) {
 		return
 	}
 
-	methodReply := &MethodResponse{Socks5Version, NOAUTH}
+	methodReply := &MethodReply{Socks5Version, NOAUTH}
 	_, err = tunnel.Write(methodReply.Encode())
 	if err != nil {
 		return
@@ -86,6 +86,11 @@ func (w *WsSocks5Proxy) handshake(tunnel Tunnel) (target net.Conn, err error) {
 	target, err = net.Dial(network, req.Address())
 	if err != nil {
 		w.sendReply(tunnel, req, UNREACH)
+		return
+	}
+
+	err = w.sendReply(tunnel, req, SUCCEEDED)
+	if err != nil {
 		return
 	}
 	return

@@ -1,33 +1,64 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 func NewProxyDispatcher(t Transport) Dispatcher {
-	return &ProxyDispatcher{
+	d := &ProxyDispatcher{
 		Transport: t,
 		RWMutex:   new(sync.RWMutex),
-		tunnels:   make(map[uint16]Tunnel),
+		tunnels:   make(map[uint16]*tunnel),
 	}
+	go d.run()
+	return d
 }
 
 type ProxyDispatcher struct {
 	Transport
 	*sync.RWMutex
-	tunnels map[uint16]Tunnel
-	index   uint16
+	tunnels  map[uint16]*tunnel
+	acceptCh chan *Frame
+	index    uint16
+	closed   atomic.Bool
 }
 
-func (d *ProxyDispatcher) OpenTunnel() (Tunnel, error) {
+func (d *ProxyDispatcher) run() {
+	defer d.Close()
+
+	for {
+		f, err := d.Read()
+		if err != nil {
+			break
+		}
+
+		t := d.getTunnel(f.Id)
+		if t == nil {
+			d.acceptCh <- f
+			continue
+		}
+
+		t.readCh <- f
+	}
+
+	d.acceptCh <- nil
+}
+
+func (d *ProxyDispatcher) IsAlive() bool {
+	return !d.closed.Load()
+}
+
+func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
 	count := 0
 	for {
 		d.Lock()
 		id := d.index
 		if d.tunnels[id] == nil {
-			t := &tunnel{d: d, id: id}
+			t := newTunnel(ctx, id, d)
 			d.tunnels[id] = t
 			d.Unlock()
 			return d.tunnels[id], nil
@@ -43,54 +74,49 @@ func (d *ProxyDispatcher) OpenTunnel() (Tunnel, error) {
 	return nil, errors.New("no available tunnel")
 }
 
-func (d *ProxyDispatcher) AcceptTunnel() (Tunnel, error) {
-	tunnelCh := make(chan any, 1)
-
-	go func() {
-		for {
-			f, err := d.Peek()
-			if err != nil {
-				tunnelCh <- err
-				break
-			}
-
-			t := d.GetTunnel(f.Id)
-			if t != nil {
-				continue
-			}
-
-			t = &tunnel{d: d, id: f.Id}
-			d.addTunnel(t)
-			tunnelCh <- t
-			break
+func (d *ProxyDispatcher) AcceptTunnel(ctx context.Context) (Tunnel, error) {
+	select {
+	case f := <-d.acceptCh:
+		if f == nil {
+			return nil, errors.New("WebSocket Connection Closed")
 		}
-	}()
 
-	r := <-tunnelCh
-	switch v := r.(type) {
-	case error:
-		return nil, v
-	case Tunnel:
-		return v, nil
-	default:
-		return nil, errors.New("unknown error")
+		r, err := ParseMethodRequest(f.Data)
+		if err != nil {
+			return nil, err
+		}
+		if len(f.Data) != 2+len(r.Methods) {
+			return nil, errors.New("accept not socks5 method request")
+		}
+
+		t := newTunnel(ctx, f.Id, d)
+		d.addTunnel(t)
+		t.readCh <- f
+		return t, nil
+
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
-func (d *ProxyDispatcher) addTunnel(t Tunnel) {
+func (d *ProxyDispatcher) addTunnel(t *tunnel) {
 	d.Lock()
 	defer d.Unlock()
 	d.tunnels[t.Id()] = t
 }
 
-func (d *ProxyDispatcher) GetTunnel(id uint16) Tunnel {
+func (d *ProxyDispatcher) getTunnel(id uint16) *tunnel {
 	d.RLock()
 	defer d.RUnlock()
 	return d.tunnels[id]
 }
 
+func (d *ProxyDispatcher) GetTunnel(id uint16) Tunnel {
+	return d.getTunnel(id)
+}
+
 func (d *ProxyDispatcher) CloseTunnel(id uint16) error {
-	var t Tunnel
+	var t *tunnel
 	defer func() {
 		if t != nil {
 			d.Lock()
@@ -99,70 +125,54 @@ func (d *ProxyDispatcher) CloseTunnel(id uint16) error {
 		}
 	}()
 
-	t = d.GetTunnel(id)
+	t = d.getTunnel(id)
 	if t != nil {
-		return d.Transport.Write(&Frame{Id: t.Id()})
+		return t.notifyClose()
 	}
 	return nil
 }
 
 func (d *ProxyDispatcher) Close() error {
-	d.Lock()
-	defer d.Unlock()
+	defer func() {
+		d.closed.Store(true)
+	}()
+
 	for id := range d.tunnels {
 		d.CloseTunnel(id)
 	}
 	return d.Transport.Close()
 }
 
-func NewProxyConnection(t Tunnel, peer io.ReadWriteCloser) *ProxyConnection {
+func NewProxyConnection(src, dst io.ReadWriteCloser) *ProxyConnection {
 	return &ProxyConnection{
-		tunnel: t,
-		peer:   peer,
+		src: src,
+		dst: dst,
 	}
 }
 
 type ProxyConnection struct {
-	tunnel Tunnel
-	peer   io.ReadWriteCloser
+	src, dst io.ReadWriteCloser
 }
 
 func (c *ProxyConnection) TunnelTraffic() {
 	go func() {
 		defer c.Close()
-
-		var (
-			data []byte
-			err  error
-		)
-		for {
-			data, err = c.tunnel.ReadOut()
-			if err != nil {
-				break
-			}
-			c.peer.Write(data)
+		_, err := io.Copy(c.dst, c.src)
+		if err != nil {
+			return
 		}
 	}()
 
 	go func() {
 		defer c.Close()
-
-		data := make([]byte, 2048)
-		var (
-			n   int
-			err error
-		)
-		for {
-			n, err = c.peer.Read(data)
-			if err != nil {
-				break
-			}
-			c.tunnel.Write(data[:n])
+		_, err := io.Copy(c.src, c.dst)
+		if err != nil {
+			return
 		}
 	}()
 }
 
 func (c *ProxyConnection) Close() error {
-	c.peer.Close()
-	return c.tunnel.Close()
+	c.dst.Close()
+	return c.src.Close()
 }
