@@ -52,12 +52,12 @@ func (r *MethodRequest) Encode() []byte {
 	return append([]byte{Socks5Version, r.NMethods}, r.Methods...)
 }
 
-type MethodResponse struct {
+type MethodReply struct {
 	Ver    uint8
 	Method uint8
 }
 
-func (r *MethodResponse) Encode() []byte {
+func (r *MethodReply) Encode() []byte {
 	return []byte{Socks5Version, r.Method}
 }
 
@@ -120,11 +120,11 @@ func ParseMethodRequest(data []byte) (*MethodRequest, error) {
 	}, nil
 }
 
-func ParseMethodResponse(data []byte) (*MethodResponse, error) {
+func ParseMethodReply(data []byte) (*MethodReply, error) {
 	if len(data) < 2 {
-		return nil, errors.New("method response need more data")
+		return nil, errors.New("method reply need more data")
 	}
-	return &MethodResponse{
+	return &MethodReply{
 		Ver:    data[0],
 		Method: data[1],
 	}, nil

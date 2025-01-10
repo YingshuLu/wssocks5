@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -43,9 +45,11 @@ func (f *Frame) BytesCount() int {
 type Dispatcher interface {
 	Transport
 
-	OpenTunnel() (Tunnel, error)
+	IsAlive() bool
 
-	AcceptTunnel() (Tunnel, error)
+	OpenTunnel(context.Context) (Tunnel, error)
+
+	AcceptTunnel(context.Context) (Tunnel, error)
 
 	GetTunnel(uint16) Tunnel
 
@@ -60,35 +64,83 @@ type Tunnel interface {
 	ReadOut() ([]byte, error)
 }
 
+func newTunnel(ctx context.Context, id uint16, d Dispatcher) *tunnel {
+	return &tunnel{
+		ctx:    ctx,
+		d:      d,
+		readCh: make(chan *Frame, 64),
+		id:     id,
+		buffer: bytes.NewBuffer(nil),
+	}
+}
+
 type tunnel struct {
+	ctx    context.Context
 	d      Dispatcher
+	readCh chan *Frame
 	id     uint16
 	closed atomic.Bool
+	buffer *bytes.Buffer
+	eof    atomic.Bool
 }
 
 func (t *tunnel) Id() uint16 {
 	return t.id
 }
 
+func (t *tunnel) readFrame() (*Frame, error) {
+	if t.eof.Load() {
+		return nil, io.EOF
+	}
+
+	select {
+	case frame := <-t.readCh:
+		if frame.Len == 0 {
+			t.eof.Store(true)
+			return nil, io.EOF
+		}
+		return frame, nil
+
+	case <-t.ctx.Done():
+		return nil, t.ctx.Err()
+	}
+}
+
 func (t *tunnel) Read(b []byte) (int, error) {
-	frame, err := t.d.Read()
+	var n int
+	if t.buffer.Len() > 0 {
+		n = copy(b, t.buffer.Bytes())
+		if n < t.buffer.Len() {
+			t.buffer.Next(n)
+		} else {
+			t.buffer.Reset()
+		}
+	}
+	if n == len(b) {
+		return n, nil
+	}
+
+	frame, err := t.readFrame()
 	if err != nil {
 		return 0, err
 	}
-	if frame.Len == 0 {
-		return 0, io.EOF
+
+	nn := copy(b[n:], frame.Data)
+	if nn < len(frame.Data) {
+		t.buffer.Write(frame.Data[nn:])
 	}
-	return copy(b, frame.Data), nil
+	return n + nn, nil
 }
 
 func (t *tunnel) ReadOut() ([]byte, error) {
-	frame, err := t.d.Read()
-	if err != nil {
-		return nil, err
+	if t.buffer.Len() > 0 {
+		defer t.buffer.Reset()
+		return t.buffer.Bytes(), nil
 	}
 
-	if frame.Len == 0 {
-		return nil, io.EOF
+	frame, err := t.readFrame()
+	if err != nil {
+		return nil, err
 	}
 	return frame.Data, nil
 }
@@ -103,8 +155,20 @@ func (t *tunnel) Write(b []byte) (int, error) {
 }
 
 func (t *tunnel) Close() error {
-	if !t.closed.CompareAndSwap(false, true) {
+	if t.closed.CompareAndSwap(false, true) {
 		return t.d.CloseTunnel(t.id)
 	}
 	return nil
+}
+
+func (t *tunnel) notifyClose() error {
+	if t.eof.CompareAndSwap(false, true) {
+		return t.sendFinFrame()
+	}
+	return nil
+}
+
+func (t *tunnel) sendFinFrame() error {
+	fin := &Frame{Id: t.id}
+	return t.d.Write(fin)
 }

@@ -4,22 +4,37 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
+	"time"
 )
 
-func NewSocks5WsProxy(ctx context.Context, l net.Listener) *Socks5WsProxy {
+type NewDispatcher = func() (Dispatcher, error)
+
+func NewSocks5WsProxy(ctx context.Context, newDispatcher NewDispatcher, l net.Listener) *Socks5WsProxy {
+	d, err := newDispatcher()
+	if err != nil {
+		panic(err)
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	return &Socks5WsProxy{
-		Listener: l,
-		ctx:      ctx,
-		cancel:   cancel,
+		Mutex:            &sync.Mutex{},
+		Dispatcher:       d,
+		Listener:         l,
+		ctx:              ctx,
+		cancel:           cancel,
+		createDispatcher: newDispatcher,
 	}
 }
 
 type Socks5WsProxy struct {
+	*sync.Mutex
 	Dispatcher
 	net.Listener
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx              context.Context
+	cancel           context.CancelFunc
+	createDispatcher NewDispatcher
+	reconnect        int
 }
 
 func (p *Socks5WsProxy) Serve() error {
@@ -53,6 +68,28 @@ func (p *Socks5WsProxy) accept(conn net.Conn) {
 }
 
 func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
+	if !p.Dispatcher.IsAlive() {
+		err := func() error {
+			p.Lock()
+			defer p.Unlock()
+			if p.reconnect >= 3 {
+				time.Sleep(8 * time.Second)
+			}
+
+			d, err := p.createDispatcher()
+			if err != nil {
+				p.reconnect += 1
+				return err
+			}
+			p.reconnect = 0
+			p.Dispatcher = d
+			return nil
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var (
 		n      int
 		buffer = make([]byte, 256)
@@ -74,7 +111,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		return
 	}
 
-	methodReply := &MethodResponse{Socks5Version, NOAUTH}
+	methodReply := &MethodReply{Socks5Version, NOAUTH}
 	_, err = conn.Write(methodReply.Encode())
 	if err != nil {
 		return
@@ -87,7 +124,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		return
 	}
 
-	tunnel, err = p.OpenTunnel()
+	tunnel, err = p.OpenTunnel(p.ctx)
 	methodRequest := &MethodRequest{Socks5Version, 1, []uint8{NOAUTH}}
 	_, err = tunnel.Write(methodRequest.Encode())
 	if err != nil {
@@ -101,7 +138,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		return
 	}
 
-	_, err = ParseMethodResponse(buffer[:n])
+	_, err = ParseMethodReply(buffer[:n])
 	if err != nil {
 		p.sendReply(conn, req, REFUSED)
 		return
