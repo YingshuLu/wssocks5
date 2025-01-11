@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 )
 
@@ -96,7 +97,7 @@ func (w *WsSocks5Proxy) handshake(tunnel Tunnel) (target net.Conn, err error) {
 	return
 }
 
-func (w *WsSocks5Proxy) sendReply(tunnel Tunnel, req *Request, rep byte) error {
+func (w *WsSocks5Proxy) sendReply(wc io.WriteCloser, req *Request, rep byte) error {
 	reply := &Reply{
 		Ver:      Socks5Version,
 		CmdOrRep: rep,
@@ -104,6 +105,6 @@ func (w *WsSocks5Proxy) sendReply(tunnel Tunnel, req *Request, rep byte) error {
 		Addr:     req.Addr,
 		Port:     req.Port,
 	}
-	_, err := tunnel.Write(reply.Encode())
+	_, err := wc.Write(reply.Encode())
 	return err
 }

@@ -3,15 +3,20 @@ package main
 import (
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
 func NewWebSocket(c *websocket.Conn) io.ReadWriteCloser {
-	return &wsConn{Conn: c}
+	return &wsConn{
+		Mutex: &sync.Mutex{},
+		Conn:  c,
+	}
 }
 
 type wsConn struct {
+	*sync.Mutex
 	*websocket.Conn
 	reader io.Reader
 }
@@ -40,6 +45,8 @@ func (ws *wsConn) Read(buf []byte) (int, error) {
 }
 
 func (ws *wsConn) Write(buf []byte) (int, error) {
+	ws.Lock()
+	defer ws.Unlock()
 	err := ws.Conn.WriteMessage(websocket.BinaryMessage, buf)
 	return len(buf), err
 }

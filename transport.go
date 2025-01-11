@@ -15,14 +15,16 @@ type Transport interface {
 
 func NewTransport(rwc io.ReadWriteCloser) Transport {
 	return &transport{
-		b:  bufio.NewReader(rwc),
-		wc: rwc,
+		b:         bufio.NewReader(rwc),
+		wc:        rwc,
+		headerBuf: make([]byte, 4),
 	}
 }
 
 type transport struct {
-	b  *bufio.Reader
-	wc io.WriteCloser
+	b         *bufio.Reader
+	wc        io.WriteCloser
+	headerBuf []byte
 }
 
 func (t *transport) Peek() (*Frame, error) {
@@ -48,15 +50,14 @@ func (t *transport) Peek() (*Frame, error) {
 }
 
 func (t *transport) Read() (*Frame, error) {
-	var b = make([]byte, 4)
-	_, err := io.ReadFull(t.b, b)
+	_, err := io.ReadFull(t.b, t.headerBuf)
 	if err != nil {
 		return nil, err
 	}
 
 	f := &Frame{
-		Id:  binary.BigEndian.Uint16(b),
-		Len: binary.BigEndian.Uint16(b[2:]),
+		Id:  binary.BigEndian.Uint16(t.headerBuf),
+		Len: binary.BigEndian.Uint16(t.headerBuf[2:]),
 	}
 
 	f.Data = make([]byte, f.Len)

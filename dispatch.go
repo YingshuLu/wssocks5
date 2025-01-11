@@ -6,6 +6,8 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func NewProxyDispatcher(t Transport) Dispatcher {
@@ -13,6 +15,7 @@ func NewProxyDispatcher(t Transport) Dispatcher {
 		Transport: t,
 		RWMutex:   new(sync.RWMutex),
 		tunnels:   make(map[uint16]*tunnel),
+		acceptCh:  make(chan *Frame, 64),
 	}
 	go d.run()
 	return d
@@ -33,16 +36,20 @@ func (d *ProxyDispatcher) run() {
 	for {
 		f, err := d.Read()
 		if err != nil {
+			log.Errorf("dispatch read error %v", err)
 			break
 		}
 
+		log.Debugf("dispatch read frame %d", f.Id)
 		t := d.getTunnel(f.Id)
-		if t == nil {
+		if t != nil {
+			t.readCh <- f
+		} else {
+			if f.Len == 0 {
+				continue
+			}
 			d.acceptCh <- f
-			continue
 		}
-
-		t.readCh <- f
 	}
 
 	d.acceptCh <- nil
@@ -89,6 +96,7 @@ func (d *ProxyDispatcher) AcceptTunnel(ctx context.Context) (Tunnel, error) {
 			return nil, errors.New("accept not socks5 method request")
 		}
 
+		log.Debugf("dispatch accept %d tunnel success", f.Id)
 		t := newTunnel(ctx, f.Id, d)
 		d.addTunnel(t)
 		t.readCh <- f
@@ -102,7 +110,7 @@ func (d *ProxyDispatcher) AcceptTunnel(ctx context.Context) (Tunnel, error) {
 func (d *ProxyDispatcher) addTunnel(t *tunnel) {
 	d.Lock()
 	defer d.Unlock()
-	d.tunnels[t.Id()] = t
+	d.tunnels[t.id] = t
 }
 
 func (d *ProxyDispatcher) getTunnel(id uint16) *tunnel {
@@ -116,19 +124,9 @@ func (d *ProxyDispatcher) GetTunnel(id uint16) Tunnel {
 }
 
 func (d *ProxyDispatcher) CloseTunnel(id uint16) error {
-	var t *tunnel
-	defer func() {
-		if t != nil {
-			d.Lock()
-			delete(d.tunnels, id)
-			d.Unlock()
-		}
-	}()
-
-	t = d.getTunnel(id)
-	if t != nil {
-		return t.notifyClose()
-	}
+	d.Lock()
+	delete(d.tunnels, id)
+	d.Unlock()
 	return nil
 }
 

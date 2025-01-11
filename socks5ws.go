@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type NewDispatcher = func() (Dispatcher, error)
@@ -56,12 +59,14 @@ func (p *Socks5WsProxy) Close() error {
 func (p *Socks5WsProxy) accept(conn net.Conn) {
 	tunnel, err := p.handshake(conn)
 	if err != nil {
+		log.Errorf("client socks5 handshake error: %v", err)
 		if tunnel != nil {
 			tunnel.Close()
 		}
 		conn.Close()
 		return
 	}
+	log.Info("client socks5 handshake success")
 
 	var proxyConnection = NewProxyConnection(tunnel, conn)
 	proxyConnection.TunnelTraffic()
@@ -69,7 +74,7 @@ func (p *Socks5WsProxy) accept(conn net.Conn) {
 
 func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 	if !p.Dispatcher.IsAlive() {
-		err := func() error {
+		err = func() error {
 			p.Lock()
 			defer p.Unlock()
 			if p.reconnect >= 3 {
@@ -86,7 +91,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 			return nil
 		}()
 		if err != nil {
-			return nil, err
+			return
 		}
 	}
 
@@ -126,7 +131,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 
 	tunnel, err = p.OpenTunnel(p.ctx)
 	methodRequest := &MethodRequest{Socks5Version, 1, []uint8{NOAUTH}}
-	_, err = tunnel.Write(methodRequest.Encode())
+	n, err = tunnel.Write(methodRequest.Encode())
 	if err != nil {
 		p.sendReply(conn, req, REFUSED)
 		return
@@ -144,7 +149,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		return
 	}
 
-	_, err = tunnel.Write(req.Encode())
+	n, err = tunnel.Write(req.Encode())
 	if err != nil {
 		p.sendReply(conn, req, REFUSED)
 		return
@@ -162,7 +167,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		return
 	}
 
-	_, err = conn.Write(buffer[:n])
+	n, err = conn.Write(buffer[:n])
 	if err != nil {
 		return
 	}
@@ -175,7 +180,7 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 	return
 }
 
-func (p *Socks5WsProxy) sendReply(conn net.Conn, req *Request, rep byte) error {
+func (p *Socks5WsProxy) sendReply(wc io.WriteCloser, req *Request, rep byte) error {
 	reply := &Reply{
 		Ver:      Socks5Version,
 		CmdOrRep: rep,
@@ -183,6 +188,6 @@ func (p *Socks5WsProxy) sendReply(conn net.Conn, req *Request, rep byte) error {
 		Addr:     req.Addr,
 		Port:     req.Port,
 	}
-	_, err := conn.Write(reply.Encode())
+	_, err := wc.Write(reply.Encode())
 	return err
 }
