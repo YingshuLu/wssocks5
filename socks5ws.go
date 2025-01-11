@@ -184,9 +184,11 @@ func (p *Socks5WsProxy) sendReply(wc io.WriteCloser, req *Request, rep byte) err
 	reply := &Reply{
 		Ver:      Socks5Version,
 		CmdOrRep: rep,
-		Atyp:     req.Atyp,
-		Addr:     req.Addr,
-		Port:     req.Port,
+	}
+	if req != nil {
+		reply.Atyp = req.Atyp
+		reply.Addr = req.Addr
+		reply.Port = req.Port
 	}
 	_, err := wc.Write(reply.Encode())
 	return err
