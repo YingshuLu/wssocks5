@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -125,49 +124,49 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 	n, err = conn.Read(buffer)
 	req, err := ParseRequest(buffer[:n])
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
 	tunnel, err = p.OpenTunnel(p.ctx)
 	methodRequest := &MethodRequest{Socks5Version, 1, []uint8{NOAUTH}}
-	n, err = tunnel.Write(methodRequest.Encode())
+	_, err = tunnel.Write(methodRequest.Encode())
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
 	n, err = tunnel.Read(buffer)
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
 	_, err = ParseMethodReply(buffer[:n])
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
-	n, err = tunnel.Write(req.Encode())
+	_, err = tunnel.Write(req.Encode())
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
 	n, err = tunnel.Read(buffer)
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
 	reply, err := ParseReply(buffer[:n])
 	if err != nil {
-		p.sendReply(conn, req, REFUSED)
+		SendSocks5Reply(conn, req, REFUSED)
 		return
 	}
 
-	n, err = conn.Write(buffer[:n])
+	_, err = conn.Write(buffer[:n])
 	if err != nil {
 		return
 	}
@@ -178,18 +177,4 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 	}
 
 	return
-}
-
-func (p *Socks5WsProxy) sendReply(wc io.WriteCloser, req *Request, rep byte) error {
-	reply := &Reply{
-		Ver:      Socks5Version,
-		CmdOrRep: rep,
-	}
-	if req != nil {
-		reply.Atyp = req.Atyp
-		reply.Addr = req.Addr
-		reply.Port = req.Port
-	}
-	_, err := wc.Write(reply.Encode())
-	return err
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net"
 )
 
@@ -76,7 +75,7 @@ func (w *WsSocks5Proxy) handshake(tunnel Tunnel) (target net.Conn, err error) {
 	data, err = tunnel.ReadOut()
 	req, err := ParseRequest(data)
 	if err != nil {
-		w.sendReply(tunnel, req, REFUSED)
+		SendSocks5Reply(tunnel, req, REFUSED)
 		return
 	}
 
@@ -86,25 +85,13 @@ func (w *WsSocks5Proxy) handshake(tunnel Tunnel) (target net.Conn, err error) {
 	}
 	target, err = net.Dial(network, req.Address())
 	if err != nil {
-		w.sendReply(tunnel, req, UNREACH)
+		SendSocks5Reply(tunnel, req, UNREACH)
 		return
 	}
 
-	err = w.sendReply(tunnel, req, SUCCEEDED)
+	err = SendSocks5Reply(tunnel, req, SUCCEEDED)
 	if err != nil {
 		return
 	}
 	return
-}
-
-func (w *WsSocks5Proxy) sendReply(wc io.WriteCloser, req *Request, rep byte) error {
-	reply := &Reply{
-		Ver:      Socks5Version,
-		CmdOrRep: rep,
-		Atyp:     req.Atyp,
-		Addr:     req.Addr,
-		Port:     req.Port,
-	}
-	_, err := wc.Write(reply.Encode())
-	return err
 }
