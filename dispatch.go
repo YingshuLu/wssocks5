@@ -15,7 +15,7 @@ func NewProxyDispatcher(t Transport) Dispatcher {
 		Transport: t,
 		RWMutex:   new(sync.RWMutex),
 		tunnels:   make(map[uint16]*tunnel),
-		acceptCh:  make(chan *Frame, 64),
+		acceptCh:  make(chan *tunnel, 64),
 	}
 	go d.run()
 	return d
@@ -25,7 +25,7 @@ type ProxyDispatcher struct {
 	Transport
 	*sync.RWMutex
 	tunnels  map[uint16]*tunnel
-	acceptCh chan *Frame
+	acceptCh chan *tunnel
 	index    uint16
 	closed   atomic.Bool
 }
@@ -42,14 +42,29 @@ func (d *ProxyDispatcher) run() {
 
 		log.Debugf("dispatch read frame %d", f.Id)
 		t := d.getTunnel(f.Id)
-		if t != nil {
-			t.readCh <- f
-		} else {
+		if t == nil {
 			if f.Len == 0 {
+				log.Warnf("tunnel %d closed, get the late EOF", f.Id)
 				continue
 			}
-			d.acceptCh <- f
+
+			r, err := ParseMethodRequest(f.Data)
+			if err != nil {
+				log.Errorf("websocket accept tunnel %d, failure with parse MethodRequest: %v", f.Id, err)
+				continue
+			}
+
+			if len(f.Data) != 2+len(r.Methods) {
+				log.Errorf("accept frame %d not socks5 method request", f.Id)
+				continue
+			}
+
+			log.Debugf("dispatch accept %d tunnel success", f.Id)
+			t := newTunnel(context.TODO(), f.Id, d)
+			d.addTunnel(t)
+			d.acceptCh <- t
 		}
+		t.readCh <- f
 	}
 
 	d.acceptCh <- nil
@@ -60,18 +75,18 @@ func (d *ProxyDispatcher) IsAlive() bool {
 }
 
 func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
+	d.Lock()
+	defer d.Unlock()
+
 	count := 0
 	for {
-		d.Lock()
 		id := d.index
 		if d.tunnels[id] == nil {
 			t := newTunnel(ctx, id, d)
 			d.tunnels[id] = t
-			d.Unlock()
 			return d.tunnels[id], nil
 		}
 		d.index++
-		d.Unlock()
 
 		count++
 		if count == 65536 {
@@ -83,23 +98,8 @@ func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
 
 func (d *ProxyDispatcher) AcceptTunnel(ctx context.Context) (Tunnel, error) {
 	select {
-	case f := <-d.acceptCh:
-		if f == nil {
-			return nil, errors.New("WebSocket Connection Closed")
-		}
-
-		r, err := ParseMethodRequest(f.Data)
-		if err != nil {
-			return nil, err
-		}
-		if len(f.Data) != 2+len(r.Methods) {
-			return nil, errors.New("accept not socks5 method request")
-		}
-
-		log.Debugf("dispatch accept %d tunnel success", f.Id)
-		t := newTunnel(ctx, f.Id, d)
-		d.addTunnel(t)
-		t.readCh <- f
+	case t := <-d.acceptCh:
+		t.ctx = ctx
 		return t, nil
 
 	case <-ctx.Done():
