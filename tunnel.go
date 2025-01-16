@@ -155,8 +155,9 @@ func (t *tunnel) Write(b []byte) (int, error) {
 
 func (t *tunnel) Close() error {
 	if t.closed.CompareAndSwap(false, true) {
-		defer t.notifyClose()
-		return t.d.CloseTunnel(t.id)
+		// should send FIN at first before removing the tunnel
+		defer t.d.CloseTunnel(t.id)
+		return t.notifyClose()
 	}
 	return nil
 }
