@@ -17,6 +17,8 @@ func NewProxyDispatcher(t Transport) Dispatcher {
 		tunnels:   make(map[uint16]*tunnel),
 		acceptCh:  make(chan *tunnel, 64),
 	}
+
+	d.ctx, d.cancel = context.WithCancel(context.Background())
 	go d.run()
 	return d
 }
@@ -28,6 +30,8 @@ type ProxyDispatcher struct {
 	acceptCh chan *tunnel
 	index    uint16
 	closed   atomic.Bool
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 func (d *ProxyDispatcher) run() {
@@ -66,8 +70,6 @@ func (d *ProxyDispatcher) run() {
 		}
 		t.readCh <- f
 	}
-
-	d.acceptCh <- nil
 }
 
 func (d *ProxyDispatcher) IsAlive() bool {
@@ -97,10 +99,16 @@ func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
 }
 
 func (d *ProxyDispatcher) AcceptTunnel(ctx context.Context) (Tunnel, error) {
+	if d.closed.Load() {
+		return nil, errors.New("Dispatcher Closed")
+	}
 	select {
 	case t := <-d.acceptCh:
 		t.ctx = ctx
 		return t, nil
+
+	case <-d.ctx.Done():
+		return nil, errors.New("Dispatcher Closing")
 
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -131,14 +139,14 @@ func (d *ProxyDispatcher) CloseTunnel(id uint16) error {
 }
 
 func (d *ProxyDispatcher) Close() error {
-	defer func() {
-		d.closed.Store(true)
-	}()
-
-	for id := range d.tunnels {
-		d.CloseTunnel(id)
+	if d.closed.CompareAndSwap(false, true) {
+		d.cancel()
+		for id := range d.tunnels {
+			d.CloseTunnel(id)
+		}
+		return d.Transport.Close()
 	}
-	return d.Transport.Close()
+	return nil
 }
 
 func NewProxyConnection(src, dst io.ReadWriteCloser) *ProxyConnection {
