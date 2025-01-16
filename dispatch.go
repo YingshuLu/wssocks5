@@ -60,7 +60,7 @@ func (d *ProxyDispatcher) run() {
 			}
 
 			log.Debugf("dispatch accept %d tunnel success", f.Id)
-			t := newTunnel(context.TODO(), f.Id, d)
+			t = newTunnel(context.TODO(), f.Id, d)
 			d.addTunnel(t)
 			d.acceptCh <- t
 		}
