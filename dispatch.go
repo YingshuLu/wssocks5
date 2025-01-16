@@ -16,6 +16,7 @@ func NewProxyDispatcher(t Transport) Dispatcher {
 		RWMutex:   new(sync.RWMutex),
 		tunnels:   make(map[uint16]*tunnel),
 		acceptCh:  make(chan *tunnel, 64),
+		closed:    &atomic.Bool{},
 	}
 
 	d.ctx, d.cancel = context.WithCancel(context.Background())
@@ -29,7 +30,7 @@ type ProxyDispatcher struct {
 	tunnels  map[uint16]*tunnel
 	acceptCh chan *tunnel
 	index    uint16
-	closed   atomic.Bool
+	closed   *atomic.Bool
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
@@ -44,7 +45,6 @@ func (d *ProxyDispatcher) run() {
 			break
 		}
 
-		log.Debugf("dispatch read frame %d", f.Id)
 		t := d.getTunnel(f.Id)
 		if t == nil {
 			if f.Len == 0 {
@@ -151,13 +151,15 @@ func (d *ProxyDispatcher) Close() error {
 
 func NewProxyConnection(src, dst io.ReadWriteCloser) *ProxyConnection {
 	return &ProxyConnection{
-		src: src,
-		dst: dst,
+		src:    src,
+		dst:    dst,
+		closed: &atomic.Bool{},
 	}
 }
 
 type ProxyConnection struct {
 	src, dst io.ReadWriteCloser
+	closed   *atomic.Bool
 }
 
 func (c *ProxyConnection) TunnelTraffic() {
@@ -179,6 +181,9 @@ func (c *ProxyConnection) TunnelTraffic() {
 }
 
 func (c *ProxyConnection) Close() error {
-	c.dst.Close()
-	return c.src.Close()
+	if c.closed.CompareAndSwap(false, true) {
+		c.dst.Close()
+		return c.src.Close()
+	}
+	return nil
 }

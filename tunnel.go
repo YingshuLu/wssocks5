@@ -69,6 +69,8 @@ func newTunnel(ctx context.Context, id uint16, d Dispatcher) *tunnel {
 		d:      d,
 		readCh: make(chan *Frame, 64),
 		id:     id,
+		closed: &atomic.Bool{},
+		eof:    &atomic.Bool{},
 	}
 }
 
@@ -77,9 +79,9 @@ type tunnel struct {
 	d      Dispatcher
 	readCh chan *Frame
 	id     uint16
-	closed atomic.Bool
+	closed *atomic.Bool
 	buffer []byte
-	eof    atomic.Bool
+	eof    *atomic.Bool
 }
 
 func (t *tunnel) Id() uint16 {
@@ -88,13 +90,12 @@ func (t *tunnel) Id() uint16 {
 
 func (t *tunnel) readFrame() (*Frame, error) {
 	if t.eof.Load() {
-		log.Errorf("tunnel %d readeof", t.id)
+		log.Errorf("tunnel %d read eof", t.id)
 		return nil, io.EOF
 	}
-	log.Debugf("tunnel %d reading frame", t.id)
+
 	select {
 	case frame := <-t.readCh:
-		log.Debugf("tunnel %d read frame", t.id)
 		if frame.Len == 0 {
 			t.eof.Store(true)
 			return nil, io.EOF
