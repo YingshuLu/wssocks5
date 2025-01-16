@@ -2,12 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -72,7 +71,7 @@ func (p *Socks5WsProxy) accept(conn net.Conn) {
 	proxyConnection.TunnelTraffic()
 }
 
-func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
+func (p *Socks5WsProxy) handshake(conn net.Conn) (s io.ReadWriteCloser, err error) {
 	if !p.Dispatcher.IsAlive() {
 		err = func() error {
 			p.Lock()
@@ -95,108 +94,9 @@ func (p *Socks5WsProxy) handshake(conn net.Conn) (tunnel Tunnel, err error) {
 		}
 	}
 
-	var (
-		n      int
-		buffer = make([]byte, 256)
-	)
-
-	phase := "init"
-	defer func() {
-		if err != nil {
-			err = errors.Wrapf(err, "[handshak] error on phase: %s", phase)
-			return
-		}
-	}()
-
-	n, err = conn.Read(buffer)
-	if err != nil {
-		phase = "read MethodRequest"
-		return
+	newConn := func(ctx context.Context) (io.ReadWriteCloser, error) {
+		return p.OpenTunnel(ctx)
 	}
 
-	_, err = ParseMethodRequest(buffer[:n])
-	if err != nil {
-		phase = "parse MethodRequest"
-		return
-	}
-
-	methodReply := &MethodReply{Socks5Version, NOAUTH}
-	_, err = conn.Write(methodReply.Encode())
-	if err != nil {
-		phase = "write MethodReply"
-		return
-	}
-
-	n, err = conn.Read(buffer)
-	if err != nil {
-		phase = "read Request"
-		return
-	}
-
-	req, err := ParseRequest(buffer[:n])
-	if err != nil {
-		phase = "parse Request"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	log.Debugf("client - try to tunnel to address %s", req.Address())
-
-	tunnel, err = p.OpenTunnel(p.ctx)
-	methodRequest := &MethodRequest{Socks5Version, 1, []uint8{NOAUTH}}
-	_, err = tunnel.Write(methodRequest.Encode())
-	if err != nil {
-		phase = "write MethodRequest"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	n, err = tunnel.Read(buffer)
-	if err != nil {
-		phase = "read MethodReply"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	_, err = ParseMethodReply(buffer[:n])
-	if err != nil {
-		phase = "parse MethodReply"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	_, err = tunnel.Write(req.Encode())
-	if err != nil {
-		phase = "write Request"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	n, err = tunnel.Read(buffer)
-	if err != nil {
-		phase = "read Reply"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	reply, err := ParseReply(buffer[:n])
-	if err != nil {
-		phase = "parse Reply"
-		SendSocks5Reply(conn, req, REFUSED)
-		return
-	}
-
-	_, err = conn.Write(buffer[:n])
-	if err != nil {
-		phase = "write Reply"
-		return
-	}
-
-	if reply.CmdOrRep != SUCCEEDED {
-		phase = "failure Reply"
-		err = fmt.Errorf("socks5 Reply with error: %v", reply.CmdOrRep)
-		return
-	}
-
-	return
+	return ProxyHandshake(p.ctx, conn, newConn)
 }
