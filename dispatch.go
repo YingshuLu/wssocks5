@@ -80,8 +80,7 @@ func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
 	d.Lock()
 	defer d.Unlock()
 
-	count := 0
-	for {
+	for count := 0; count < 65534; count++ {
 		id := d.index
 		if d.tunnels[id] == nil {
 			t := newTunnel(ctx, id, d)
@@ -89,11 +88,6 @@ func (d *ProxyDispatcher) OpenTunnel(ctx context.Context) (Tunnel, error) {
 			return d.tunnels[id], nil
 		}
 		d.index++
-
-		count++
-		if count == 65536 {
-			break
-		}
 	}
 	return nil, errors.New("no available tunnel")
 }

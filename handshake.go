@@ -41,6 +41,9 @@ func SendSocks5Reply(w io.Writer, req *Request, rep byte) error {
 		reply.Atyp = req.Atyp
 		reply.Addr = req.Addr
 		reply.Port = req.Port
+	} else {
+		reply.Atyp = IPV4
+		reply.Addr = []byte{0, 0, 0, 0}
 	}
 	_, err := w.Write(reply.Encode())
 	return err
@@ -55,7 +58,7 @@ func ProxyHandshake(ctx context.Context, c io.ReadWriteCloser, newConn NewConnec
 
 	defer func() {
 		if err != nil {
-			err = errors.Wrapf(err, "[proxy handshak] error on phase: %s", phase)
+			err = errors.Wrapf(err, "[proxy handshake] error on phase: %s", phase)
 			log.Error(err)
 			return
 		}

@@ -131,17 +131,40 @@ func ParseMethodReply(data []byte) (*MethodReply, error) {
 }
 
 func parseMessage(data []byte) (*message, error) {
-	if len(data) < 10 {
+	if len(data) < 7 {
 		return nil, errors.New("message need more data")
 	}
-	return &message{
+
+	m := &message{
 		Ver:      data[0],
 		CmdOrRep: data[1],
 		Rsv:      data[2],
 		Atyp:     data[3],
-		Addr:     data[4 : len(data)-2],
-		Port:     binary.BigEndian.Uint16(data[len(data)-2:]),
-	}, nil
+	}
+
+	addrLen := 0
+	switch m.Atyp {
+	case IPV4:
+		addrLen = net.IPv4len
+	case IPV6:
+		addrLen = net.IPv6len
+	case DOMAIN:
+		if len(data) < 5 {
+			return nil, errors.New("message need more data for domain length")
+		}
+		addrLen = int(data[4]) + 1
+	default:
+		return nil, errors.New("invalid address type")
+	}
+
+	if len(data) < 4+addrLen+2 {
+		return nil, errors.New("message need more data for address and port")
+	}
+
+	m.Addr = data[4 : 4+addrLen]
+	m.Port = binary.BigEndian.Uint16(data[4+addrLen:])
+
+	return m, nil
 }
 
 func ParseRequest(data []byte) (*Request, error) {
