@@ -42,6 +42,14 @@ const (
 	ATYPNSUPP byte = 0x08
 )
 
+var (
+	ErrVersionMismatch = errors.New("unsupported SOCKS version")
+	ErrMethodsMismatch = errors.New("methods length mismatch")
+	ErrReservedField   = errors.New("reserved field must be 0x00")
+	ErrNeedMoreData    = errors.New("need more data")
+	ErrInvalidAtyp     = errors.New("invalid address type")
+)
+
 type MethodRequest struct {
 	Ver      uint8
 	NMethods uint8
@@ -113,6 +121,13 @@ func ParseMethodRequest(data []byte) (*MethodRequest, error) {
 	if len(data) < 3 {
 		return nil, errors.New("method request need more data")
 	}
+	if data[0] != Socks5Version {
+		return nil, errors.New("unsupported SOCKS version")
+	}
+	nMethods := int(data[1])
+	if len(data[2:]) != nMethods {
+		return nil, errors.New("methods length mismatch")
+	}
 	return &MethodRequest{
 		Ver:      data[0],
 		NMethods: data[1],
@@ -122,7 +137,7 @@ func ParseMethodRequest(data []byte) (*MethodRequest, error) {
 
 func ParseMethodReply(data []byte) (*MethodReply, error) {
 	if len(data) < 2 {
-		return nil, errors.New("method reply need more data")
+		return nil, ErrNeedMoreData
 	}
 	return &MethodReply{
 		Ver:    data[0],
@@ -133,6 +148,14 @@ func ParseMethodReply(data []byte) (*MethodReply, error) {
 func parseMessage(data []byte) (*message, error) {
 	if len(data) < 7 {
 		return nil, errors.New("message need more data")
+	}
+
+	if data[0] != Socks5Version {
+		return nil, errors.New("unsupported SOCKS version")
+	}
+
+	if data[2] != 0x00 {
+		return nil, errors.New("reserved field must be 0x00")
 	}
 
 	m := &message{
@@ -150,15 +173,15 @@ func parseMessage(data []byte) (*message, error) {
 		addrLen = net.IPv6len
 	case DOMAIN:
 		if len(data) < 5 {
-			return nil, errors.New("message need more data for domain length")
+			return nil, ErrNeedMoreData
 		}
 		addrLen = int(data[4]) + 1
 	default:
-		return nil, errors.New("invalid address type")
+		return nil, ErrInvalidAtyp
 	}
 
 	if len(data) < 4+addrLen+2 {
-		return nil, errors.New("message need more data for address and port")
+		return nil, ErrNeedMoreData
 	}
 
 	m.Addr = data[4 : 4+addrLen]
